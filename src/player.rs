@@ -46,8 +46,13 @@ impl MpvPlayer {
 
         let mut cmd = Command::new("mpv");
         cmd.arg(format!("--input-ipc-server={}", self.socket_path.display()))
-            .arg("--force-window=yes")
-            .arg(url)
+            .arg("--force-window=yes");
+        
+        if std::env::var("WAYLAND_DISPLAY").is_ok() {
+            cmd.arg("--gpu-context=waylandvk");
+        }
+        
+        cmd.arg(url)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
