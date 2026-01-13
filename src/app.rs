@@ -1,6 +1,6 @@
 use crate::client::{JellyfinClient, MediaItem};
 use crate::config::Config;
-use crate::download::{DownloadManager, DownloadTask, DownloadStatus};
+use crate::download::{DownloadManager, DownloadStatus, DownloadTask};
 use crate::player::MpvPlayer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +79,9 @@ pub struct App {
     pub player: MpvPlayer,
     pub now_playing: Option<PlayingItem>,
     pub last_position_ticks: u64,
+    pub playback_position_secs: f64,
+    pub playback_duration_secs: f64,
+    pub playback_paused: bool,
 
     pub search_query: String,
     pub search_results: Vec<MediaItem>,
@@ -126,6 +129,9 @@ impl App {
             player: MpvPlayer::new(),
             now_playing: None,
             last_position_ticks: 0,
+            playback_position_secs: 0.0,
+            playback_duration_secs: 0.0,
+            playback_paused: false,
             search_query: String::new(),
             search_results: Vec::new(),
             search_selected: 0,
@@ -146,6 +152,42 @@ impl App {
             LoginField::Username => &mut self.username_input,
             LoginField::Password => &mut self.password_input,
         }
+    }
+
+    pub fn handle_unauthorized(&mut self, error: &anyhow::Error) -> bool {
+        let message = error.to_string();
+        if message.contains("401") || message.contains("Unauthorized") {
+            self.reset_to_login("Session expired. Please log in again.");
+            true
+        } else {
+            false
+        }
+    }
+
+    fn reset_to_login(&mut self, message: &str) {
+        self.screen = Screen::Login;
+        self.client = None;
+        self.login_loading = false;
+        self.login_error = Some(message.to_string());
+        self.password_input.clear();
+        self.error_message = None;
+        self.nav_stack.clear();
+        self.home_items.clear();
+        self.items.clear();
+        self.selected_index = 0;
+        self.search_query.clear();
+        self.search_results.clear();
+        self.search_selected = 0;
+        self.show_downloads = false;
+        self.now_playing = None;
+        self.last_position_ticks = 0;
+        self.playback_position_secs = 0.0;
+        self.playback_duration_secs = 0.0;
+        self.playback_paused = false;
+        self.player.stop();
+        self.config.access_token = None;
+        self.config.user_id = None;
+        let _ = self.config.save();
     }
 
     pub async fn attempt_login(&mut self) -> anyhow::Result<()> {
@@ -183,70 +225,128 @@ impl App {
         self.error_message = None;
         self.home_items.clear();
 
-        if let Some(ref client) = self.client {
+        if self.client.is_some() {
             // Libraries
-            match client.get_user_views().await {
+            match {
+                let client = self.client.as_ref().unwrap();
+                client.get_user_views().await
+            } {
                 Ok(libs) => {
                     if !libs.is_empty() {
-                        self.home_items.push(HomeDisplayItem::Header("Libraries".to_string()));
+                        self.home_items
+                            .push(HomeDisplayItem::Header("Libraries".to_string()));
                         for lib in libs {
                             self.home_items.push(HomeDisplayItem::Library(lib));
                         }
                     }
                 }
-                Err(e) => self.error_message = Some(e.to_string()),
+                Err(e) => {
+                    if self.handle_unauthorized(&e) {
+                        self.loading = false;
+                        return Ok(());
+                    }
+                    self.error_message = Some(e.to_string());
+                }
             }
 
             // Continue Watching
-            match client.get_resume_items(10).await {
+            match {
+                let client = self.client.as_ref().unwrap();
+                client.get_resume_items(10).await
+            } {
                 Ok(resp) => {
                     if !resp.items.is_empty() {
-                        self.home_items.push(HomeDisplayItem::Header("Continue Watching".to_string()));
+                        self.home_items
+                            .push(HomeDisplayItem::Header("Continue Watching".to_string()));
                         for item in resp.items {
                             self.home_items.push(HomeDisplayItem::Item(item));
                         }
                     }
                 }
-                Err(e) => if self.error_message.is_none() { self.error_message = Some(e.to_string()) },
+                Err(e) => {
+                    if self.handle_unauthorized(&e) {
+                        self.loading = false;
+                        return Ok(());
+                    }
+                    if self.error_message.is_none() {
+                        self.error_message = Some(e.to_string());
+                    }
+                }
             }
 
             // Next Up
-            match client.get_next_up_items(10).await {
+            match {
+                let client = self.client.as_ref().unwrap();
+                client.get_next_up_items(10).await
+            } {
                 Ok(resp) => {
                     if !resp.items.is_empty() {
-                        self.home_items.push(HomeDisplayItem::Header("Next Up".to_string()));
+                        self.home_items
+                            .push(HomeDisplayItem::Header("Next Up".to_string()));
                         for item in resp.items {
                             self.home_items.push(HomeDisplayItem::Item(item));
                         }
                     }
                 }
-                Err(e) => if self.error_message.is_none() { self.error_message = Some(e.to_string()) },
+                Err(e) => {
+                    if self.handle_unauthorized(&e) {
+                        self.loading = false;
+                        return Ok(());
+                    }
+                    if self.error_message.is_none() {
+                        self.error_message = Some(e.to_string());
+                    }
+                }
             }
 
             // Recently in Movies
-            match client.get_latest_items(&["Movie"], 10).await {
+            match {
+                let client = self.client.as_ref().unwrap();
+                client.get_latest_items(&["Movie"], 10).await
+            } {
                 Ok(resp) => {
                     if !resp.items.is_empty() {
-                        self.home_items.push(HomeDisplayItem::Header("Recently in Movies".to_string()));
+                        self.home_items
+                            .push(HomeDisplayItem::Header("Recently in Movies".to_string()));
                         for item in resp.items {
                             self.home_items.push(HomeDisplayItem::Item(item));
                         }
                     }
                 }
-                Err(e) => if self.error_message.is_none() { self.error_message = Some(e.to_string()) },
+                Err(e) => {
+                    if self.handle_unauthorized(&e) {
+                        self.loading = false;
+                        return Ok(());
+                    }
+                    if self.error_message.is_none() {
+                        self.error_message = Some(e.to_string());
+                    }
+                }
             }
 
             // Recently in TV Shows
-            match client.get_latest_items(&["Series"], 10).await {
+            match {
+                let client = self.client.as_ref().unwrap();
+                client.get_latest_items(&["Series"], 10).await
+            } {
                 Ok(resp) => {
                     if !resp.items.is_empty() {
-                        self.home_items.push(HomeDisplayItem::Header("Recently in TV Shows".to_string()));
+                        self.home_items
+                            .push(HomeDisplayItem::Header("Recently in TV Shows".to_string()));
                         for item in resp.items {
                             self.home_items.push(HomeDisplayItem::Item(item));
                         }
                     }
                 }
-                Err(e) => if self.error_message.is_none() { self.error_message = Some(e.to_string()) },
+                Err(e) => {
+                    if self.handle_unauthorized(&e) {
+                        self.loading = false;
+                        return Ok(());
+                    }
+                    if self.error_message.is_none() {
+                        self.error_message = Some(e.to_string());
+                    }
+                }
             }
 
             self.selected_index = 0;
@@ -274,6 +374,10 @@ impl App {
                     self.loading = false;
                 }
                 Err(e) => {
+                    if self.handle_unauthorized(&e) {
+                        self.loading = false;
+                        return Ok(());
+                    }
                     self.error_message = Some(e.to_string());
                     self.loading = false;
                 }
@@ -397,7 +501,15 @@ impl App {
                         Ok(None)
                     } else {
                         let full_item = if let Some(ref client) = self.client {
-                            client.get_item(&item.id).await.unwrap_or(item)
+                            match client.get_item(&item.id).await {
+                                Ok(full_item) => full_item,
+                                Err(e) => {
+                                    if self.handle_unauthorized(&e) {
+                                        return Ok(None);
+                                    }
+                                    item
+                                }
+                            }
                         } else {
                             item
                         };
@@ -434,7 +546,15 @@ impl App {
                         Ok(None)
                     } else {
                         let full_item = if let Some(ref client) = self.client {
-                            client.get_item(&item.id).await.unwrap_or(item)
+                            match client.get_item(&item.id).await {
+                                Ok(full_item) => full_item,
+                                Err(e) => {
+                                    if self.handle_unauthorized(&e) {
+                                        return Ok(None);
+                                    }
+                                    item
+                                }
+                            }
                         } else {
                             item
                         };
@@ -477,6 +597,10 @@ impl App {
                     self.loading = false;
                 }
                 Err(e) => {
+                    if self.handle_unauthorized(&e) {
+                        self.loading = false;
+                        return Ok(());
+                    }
                     self.error_message = Some(e.to_string());
                     self.loading = false;
                 }
@@ -510,7 +634,9 @@ impl App {
             Screen::Library => self.items.get(self.selected_index).cloned(),
             Screen::Search => self.search_results.get(self.search_selected).cloned(),
             Screen::Home => {
-                if let Some(HomeDisplayItem::Item(item)) = self.home_items.get(self.selected_index).cloned() {
+                if let Some(HomeDisplayItem::Item(item)) =
+                    self.home_items.get(self.selected_index).cloned()
+                {
                     Some(item)
                 } else {
                     None
@@ -596,12 +722,11 @@ impl App {
         match self.screen {
             Screen::Login => "Login".to_string(),
             Screen::Home => "Libraries".to_string(),
-            Screen::Library => {
-                self.nav_stack
-                    .last()
-                    .map(|e| e.title.clone())
-                    .unwrap_or_else(|| "Library".to_string())
-            }
+            Screen::Library => self
+                .nav_stack
+                .last()
+                .map(|e| e.title.clone())
+                .unwrap_or_else(|| "Library".to_string()),
             Screen::Search => "Search".to_string(),
         }
     }

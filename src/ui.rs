@@ -1,9 +1,9 @@
 use ratatui::{
+    Frame,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph},
-    Frame,
 };
 
 use crate::app::{App, HomeDisplayItem, LoginField, Screen};
@@ -92,7 +92,13 @@ fn render_login(frame: &mut Frame, app: &App) {
 fn render_browser(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
-    let chunks = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).split(area);
+    let footer_height = if app.now_playing.is_some() { 3 } else { 0 };
+    let chunks = Layout::vertical([
+        Constraint::Min(3),
+        Constraint::Length(1),
+        Constraint::Length(footer_height),
+    ])
+    .split(area);
 
     let title = format!("Jellytui - {}", app.current_title());
     let block = Block::default()
@@ -187,6 +193,10 @@ fn render_browser(frame: &mut Frame, app: &App) {
     };
     let help = Paragraph::new(help_text).style(Style::default().fg(Color::DarkGray));
     frame.render_widget(help, chunks[1]);
+
+    if app.now_playing.is_some() && chunks[2].height > 0 && chunks[2].width > 0 {
+        render_now_playing_footer(frame, app, chunks[2]);
+    }
 }
 
 fn format_item(item: &MediaItem) -> String {
@@ -214,6 +224,72 @@ fn format_item(item: &MediaItem) -> String {
     };
 
     format!("{} {}{}{}", type_icon, item.name, episode_info, year)
+}
+
+fn render_now_playing_footer(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(ref playing) = app.now_playing else {
+        return;
+    };
+
+    let duration = app.playback_duration_secs;
+    let percent = if duration > 0.0 {
+        (app.playback_position_secs / duration * 100.0).clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
+
+    let status = if app.playback_paused {
+        "Paused"
+    } else {
+        "Playing"
+    };
+    let label = if duration > 0.0 {
+        format!(
+            "{} / {}  •  {}",
+            format_duration(app.playback_position_secs),
+            format_duration(duration),
+            status
+        )
+    } else {
+        format!(
+            "{}  •  {}",
+            format_duration(app.playback_position_secs),
+            status
+        )
+    };
+
+    let title = format!("Now Playing - {}", format_item(&playing.item));
+    let gauge_color = if app.playback_paused {
+        Color::Yellow
+    } else {
+        Color::Green
+    };
+
+    let gauge = Gauge::default()
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Green)),
+        )
+        .gauge_style(Style::default().fg(gauge_color).bg(Color::DarkGray))
+        .percent(percent.round() as u16)
+        .label(Span::styled(label, Style::default().fg(Color::White)));
+
+    frame.render_widget(gauge, area);
+}
+
+fn format_duration(seconds: f64) -> String {
+    let total_seconds = seconds.max(0.0).floor() as u64;
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let secs = total_seconds % 60;
+
+    if hours > 0 {
+        format!("{}:{:02}:{:02}", hours, minutes, secs)
+    } else {
+        format!("{:02}:{:02}", minutes, secs)
+    }
 }
 
 fn field_style(focused: bool) -> Style {
@@ -254,10 +330,12 @@ fn set_cursor_for_input(frame: &mut Frame, app: &App, chunks: std::rc::Rc<[Rect]
 fn render_search(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
+    let footer_height = if app.now_playing.is_some() { 3 } else { 0 };
     let chunks = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(3),
         Constraint::Length(1),
+        Constraint::Length(footer_height),
     ])
     .split(area);
 
@@ -328,6 +406,10 @@ fn render_search(frame: &mut Frame, app: &App) {
     let help = Paragraph::new("Type to search | Up/Down: navigate | Enter: open/play | Esc: close")
         .style(Style::default().fg(Color::DarkGray));
     frame.render_widget(help, chunks[2]);
+
+    if app.now_playing.is_some() && chunks[3].height > 0 && chunks[3].width > 0 {
+        render_now_playing_footer(frame, app, chunks[3]);
+    }
 }
 
 fn render_downloads_popup(frame: &mut Frame, app: &App) {

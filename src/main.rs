@@ -268,6 +268,7 @@ async fn start_playback(
         return;
     }
 
+    let mut start_error = None;
     if let Some(ref client) = app.client {
         let start_info = PlaybackStartInfo {
             item_id: playing_item.item.id.clone(),
@@ -277,9 +278,21 @@ async fn start_playback(
             volume_level: 100,
             play_method: "DirectStream".to_string(),
         };
-        let _ = client.report_playback_start(&start_info).await;
+        start_error = client.report_playback_start(&start_info).await.err();
+    }
+    if let Some(e) = start_error {
+        if app.handle_unauthorized(&e) {
+            return;
+        }
     }
 
+    app.playback_position_secs = start_position_secs;
+    app.playback_duration_secs = playing_item
+        .item
+        .run_time_ticks
+        .map(|ticks| ticks as f64 / TICKS_PER_SECOND as f64)
+        .unwrap_or(0.0);
+    app.playback_paused = false;
     app.now_playing = Some(playing_item);
 
     let socket_path = app.player.socket_path().clone();
@@ -291,10 +304,14 @@ async fn start_playback(
 async fn handle_player_event(app: &mut App, event: PlayerEvent) {
     match event {
         PlayerEvent::Progress(state) => {
-            if let Some(ref playing) = app.now_playing {
+            if let Some(playing) = app.now_playing.clone() {
                 let position_ticks = (state.position_secs * TICKS_PER_SECOND as f64) as u64;
                 app.last_position_ticks = position_ticks;
+                app.playback_position_secs = state.position_secs;
+                app.playback_duration_secs = state.duration_secs;
+                app.playback_paused = state.paused;
 
+                let mut auth_error = None;
                 if let Some(ref client) = app.client {
                     let progress_info = PlaybackProgressInfo {
                         item_id: playing.item.id.clone(),
@@ -303,14 +320,21 @@ async fn handle_player_event(app: &mut App, event: PlayerEvent) {
                         is_muted: false,
                         volume_level: 100,
                     };
-                    let _ = client.report_playback_progress(&progress_info).await;
+                    auth_error = client.report_playback_progress(&progress_info).await.err();
 
-                    if let Some(duration_ticks) = playing.item.run_time_ticks {
-                        let progress_percent =
-                            position_ticks as f64 / duration_ticks as f64 * 100.0;
-                        if progress_percent >= 90.0 {
-                            let _ = client.mark_played(&playing.item.id).await;
+                    if auth_error.is_none() {
+                        if let Some(duration_ticks) = playing.item.run_time_ticks {
+                            let progress_percent =
+                                position_ticks as f64 / duration_ticks as f64 * 100.0;
+                            if progress_percent >= 90.0 {
+                                auth_error = client.mark_played(&playing.item.id).await.err();
+                            }
                         }
+                    }
+                }
+                if let Some(e) = auth_error {
+                    if app.handle_unauthorized(&e) {
+                        return;
                     }
                 }
             }
@@ -325,6 +349,7 @@ async fn handle_player_event(app: &mut App, event: PlayerEvent) {
 }
 
 async fn handle_playback_finished(app: &mut App) {
+    let mut stop_error = None;
     if let Some(playing) = app.now_playing.take()
         && let Some(ref client) = app.client
     {
@@ -332,9 +357,17 @@ async fn handle_playback_finished(app: &mut App) {
             item_id: playing.item.id.clone(),
             position_ticks: app.last_position_ticks,
         };
-        let _ = client.report_playback_stop(&stop_info).await;
+        stop_error = client.report_playback_stop(&stop_info).await.err();
+    }
+    if let Some(e) = stop_error {
+        if app.handle_unauthorized(&e) {
+            return;
+        }
     }
     app.last_position_ticks = 0;
+    app.playback_position_secs = 0.0;
+    app.playback_duration_secs = 0.0;
+    app.playback_paused = false;
     app.player.stop();
 }
 

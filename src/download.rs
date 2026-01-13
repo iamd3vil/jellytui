@@ -65,7 +65,13 @@ impl DownloadManager {
     pub fn create_task(&self, item_id: String, item_name: String, url: String) -> DownloadTask {
         let safe_name = item_name
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' || c == '.' { c } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' || c == '.' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect::<String>();
 
         let file_path = self.download_dir.join(format!("{}.mkv", safe_name));
@@ -74,10 +80,7 @@ impl DownloadManager {
     }
 }
 
-pub async fn perform_download(
-    task: DownloadTask,
-    tx: mpsc::UnboundedSender<DownloadEvent>,
-) {
+pub async fn perform_download(task: DownloadTask, tx: mpsc::UnboundedSender<DownloadEvent>) {
     let _ = tx.send(DownloadEvent::Started {
         item_id: task.item_id.clone(),
     });

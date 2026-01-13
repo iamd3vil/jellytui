@@ -28,7 +28,8 @@ pub struct MpvPlayer {
 
 impl MpvPlayer {
     pub fn new() -> Self {
-        let socket_path = std::env::temp_dir().join(format!("jellytui-mpv-{}.sock", std::process::id()));
+        let socket_path =
+            std::env::temp_dir().join(format!("jellytui-mpv-{}.sock", std::process::id()));
         Self {
             process: None,
             socket_path,
@@ -47,15 +48,15 @@ impl MpvPlayer {
         let mut cmd = Command::new("mpv");
         cmd.arg(format!("--input-ipc-server={}", self.socket_path.display()))
             .arg("--force-window=yes");
-        
+
         if std::env::var("WAYLAND_DISPLAY").is_ok() {
             cmd.arg("--gpu-context=waylandvk");
         }
-        
+
         cmd.arg(url)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
         if let Some(pos) = start_position_secs
             && pos > 0.0
@@ -63,8 +64,34 @@ impl MpvPlayer {
             cmd.arg(format!("--start={}", pos));
         }
 
-        let child = cmd.spawn()?;
-        self.process = Some(child);
+        let mut child = cmd.spawn()?;
+
+        std::thread::sleep(Duration::from_millis(500));
+
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stderr = child.stderr.take();
+                let stderr_output = stderr
+                    .map(|mut s| {
+                        let mut buf = String::new();
+                        std::io::Read::read_to_string(&mut s, &mut buf).ok();
+                        buf
+                    })
+                    .unwrap_or_default();
+
+                anyhow::bail!(
+                    "mpv exited immediately with status {}: {}",
+                    status,
+                    stderr_output.trim()
+                );
+            }
+            Ok(None) => {
+                self.process = Some(child);
+            }
+            Err(e) => {
+                anyhow::bail!("Failed to check mpv status: {}", e);
+            }
+        }
 
         Ok(())
     }
@@ -102,21 +129,21 @@ impl Drop for MpvPlayer {
     }
 }
 
-pub async fn monitor_playback(
-    socket_path: PathBuf,
-    tx: mpsc::UnboundedSender<PlayerEvent>,
-) {
+pub async fn monitor_playback(socket_path: PathBuf, tx: mpsc::UnboundedSender<PlayerEvent>) {
     tokio::time::sleep(Duration::from_millis(1000)).await;
 
     let mut mpv = match MpvIpc::connect(&socket_path).await {
         Ok(m) => m,
         Err(e) => {
-            let _ = tx.send(PlayerEvent::Error(format!("Failed to connect to MPV: {}", e)));
+            let _ = tx.send(PlayerEvent::Error(format!(
+                "Failed to connect to MPV: {}",
+                e
+            )));
             return;
         }
     };
 
-    let mut ticker = interval(Duration::from_secs(5));
+    let mut ticker = interval(Duration::from_secs(1));
 
     loop {
         ticker.tick().await;

@@ -193,7 +193,12 @@ impl JellyfinClient {
         Ok(views.items)
     }
 
-    pub async fn get_items(&self, parent_id: &str, start_index: u32, limit: u32) -> Result<ItemsResponse> {
+    pub async fn get_items(
+        &self,
+        parent_id: &str,
+        start_index: u32,
+        limit: u32,
+    ) -> Result<ItemsResponse> {
         let user_id = self
             .user_id
             .as_ref()
@@ -409,7 +414,10 @@ impl JellyfinClient {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Not authenticated"))?;
 
-        let url = format!("{}/Users/{}/PlayedItems/{}", self.server_url, user_id, item_id);
+        let url = format!(
+            "{}/Users/{}/PlayedItems/{}",
+            self.server_url, user_id, item_id
+        );
 
         let response = self
             .client
