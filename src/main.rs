@@ -6,7 +6,10 @@ mod events;
 mod player;
 mod ui;
 
-use std::{io, time::Duration};
+use std::{
+    io,
+    time::{Duration, Instant},
+};
 
 use anyhow::Result;
 use crossterm::{
@@ -253,6 +256,8 @@ async fn start_playback(
     playing_item: PlayingItem,
     player_tx: mpsc::UnboundedSender<PlayerEvent>,
 ) {
+    app.playback_session_id = app.playback_session_id.wrapping_add(1);
+    let session_id = app.playback_session_id;
     let start_position_secs = playing_item.start_position_ticks as f64 / TICKS_PER_SECOND as f64;
 
     let stream_url = match &app.client {
@@ -264,12 +269,15 @@ async fn start_playback(
     };
 
     if let Err(e) = app.player.start(&stream_url, Some(start_position_secs)) {
-        app.error_message = Some(format!("Failed to start player: {}", e));
+        app.error_message = Some(format!(
+            "Failed to start player: {}. MPV log: {}",
+            e,
+            app.player.log_path().display()
+        ));
         return;
     }
 
-    let mut start_error = None;
-    if let Some(ref client) = app.client {
+    if let Some(client) = app.client.clone() {
         let start_info = PlaybackStartInfo {
             item_id: playing_item.item.id.clone(),
             position_ticks: playing_item.start_position_ticks,
@@ -278,12 +286,9 @@ async fn start_playback(
             volume_level: 100,
             play_method: "DirectStream".to_string(),
         };
-        start_error = client.report_playback_start(&start_info).await.err();
-    }
-    if let Some(e) = start_error {
-        if app.handle_unauthorized(&e) {
-            return;
-        }
+        tokio::spawn(async move {
+            let _ = client.report_playback_start(&start_info).await;
+        });
     }
 
     app.playback_position_secs = start_position_secs;
@@ -293,26 +298,42 @@ async fn start_playback(
         .map(|ticks| ticks as f64 / TICKS_PER_SECOND as f64)
         .unwrap_or(0.0);
     app.playback_paused = false;
+    app.last_progress_report = None;
+    app.marked_as_played = false;
     app.now_playing = Some(playing_item);
 
     let socket_path = app.player.socket_path().clone();
+    let log_path = app.player.log_path().clone();
     tokio::spawn(async move {
-        monitor_playback(socket_path, player_tx).await;
+        monitor_playback(socket_path, log_path, session_id, player_tx).await;
     });
 }
 
+const PROGRESS_REPORT_INTERVAL_SECS: u64 = 5;
+
 async fn handle_player_event(app: &mut App, event: PlayerEvent) {
     match event {
-        PlayerEvent::Progress(state) => {
-            if let Some(playing) = app.now_playing.clone() {
-                let position_ticks = (state.position_secs * TICKS_PER_SECOND as f64) as u64;
-                app.last_position_ticks = position_ticks;
-                app.playback_position_secs = state.position_secs;
-                app.playback_duration_secs = state.duration_secs;
-                app.playback_paused = state.paused;
+        PlayerEvent::Progress { session_id, state } => {
+            if session_id != app.playback_session_id {
+                return;
+            }
 
-                let mut auth_error = None;
-                if let Some(ref client) = app.client {
+            let position_ticks = (state.position_secs * TICKS_PER_SECOND as f64) as u64;
+            app.last_position_ticks = position_ticks;
+            app.playback_position_secs = state.position_secs;
+            app.playback_duration_secs = state.duration_secs;
+            app.playback_paused = state.paused;
+
+            let should_report = app
+                .last_progress_report
+                .map(|t| t.elapsed().as_secs() >= PROGRESS_REPORT_INTERVAL_SECS)
+                .unwrap_or(true);
+
+            if should_report {
+                if let (Some(playing), Some(client)) = (app.now_playing.clone(), app.client.clone())
+                {
+                    app.last_progress_report = Some(Instant::now());
+
                     let progress_info = PlaybackProgressInfo {
                         item_id: playing.item.id.clone(),
                         position_ticks,
@@ -320,54 +341,78 @@ async fn handle_player_event(app: &mut App, event: PlayerEvent) {
                         is_muted: false,
                         volume_level: 100,
                     };
-                    auth_error = client.report_playback_progress(&progress_info).await.err();
 
-                    if auth_error.is_none() {
-                        if let Some(duration_ticks) = playing.item.run_time_ticks {
-                            let progress_percent =
-                                position_ticks as f64 / duration_ticks as f64 * 100.0;
-                            if progress_percent >= 90.0 {
-                                auth_error = client.mark_played(&playing.item.id).await.err();
+                    tokio::spawn(async move {
+                        let _ = client.report_playback_progress(&progress_info).await;
+                    });
+                }
+            }
+
+            if !app.marked_as_played {
+                if let Some(playing) = app.now_playing.as_ref() {
+                    if let Some(duration_ticks) = playing.item.run_time_ticks {
+                        let progress_percent =
+                            position_ticks as f64 / duration_ticks as f64 * 100.0;
+                        if progress_percent >= 90.0 {
+                            app.marked_as_played = true;
+                            if let Some(client) = app.client.clone() {
+                                let item_id = playing.item.id.clone();
+                                tokio::spawn(async move {
+                                    let _ = client.mark_played(&item_id).await;
+                                });
                             }
                         }
                     }
                 }
-                if let Some(e) = auth_error {
-                    if app.handle_unauthorized(&e) {
-                        return;
-                    }
-                }
             }
         }
-        PlayerEvent::Finished => {
+        PlayerEvent::Finished { session_id } => {
+            if session_id != app.playback_session_id {
+                return;
+            }
             handle_playback_finished(app).await;
         }
-        PlayerEvent::Error(_) => {
+        PlayerEvent::Error {
+            session_id,
+            message,
+        } => {
+            if session_id != app.playback_session_id {
+                return;
+            }
+
+            if app.player.is_running() {
+                return;
+            }
+
+            app.error_message = Some(format!(
+                "Player error: {}. MPV log: {}",
+                message,
+                app.player.log_path().display()
+            ));
             handle_playback_finished(app).await;
         }
     }
 }
 
 async fn handle_playback_finished(app: &mut App) {
-    let mut stop_error = None;
-    if let Some(playing) = app.now_playing.take()
-        && let Some(ref client) = app.client
-    {
-        let stop_info = PlaybackStopInfo {
-            item_id: playing.item.id.clone(),
-            position_ticks: app.last_position_ticks,
-        };
-        stop_error = client.report_playback_stop(&stop_info).await.err();
-    }
-    if let Some(e) = stop_error {
-        if app.handle_unauthorized(&e) {
-            return;
-        }
+    app.playback_session_id = app.playback_session_id.wrapping_add(1);
+
+    if let (Some(playing), Some(client)) = (app.now_playing.take(), app.client.clone()) {
+        let position_ticks = app.last_position_ticks;
+        tokio::spawn(async move {
+            let stop_info = PlaybackStopInfo {
+                item_id: playing.item.id.clone(),
+                position_ticks,
+            };
+            let _ = client.report_playback_stop(&stop_info).await;
+        });
     }
     app.last_position_ticks = 0;
     app.playback_position_secs = 0.0;
     app.playback_duration_secs = 0.0;
     app.playback_paused = false;
+    app.last_progress_report = None;
+    app.marked_as_played = false;
     app.player.stop();
 }
 

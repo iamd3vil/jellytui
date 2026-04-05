@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::Result;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -102,6 +104,7 @@ pub struct PlaybackStopInfo {
     pub position_ticks: u64,
 }
 
+#[derive(Clone)]
 pub struct JellyfinClient {
     client: Client,
     pub server_url: String,
@@ -110,9 +113,16 @@ pub struct JellyfinClient {
 }
 
 impl JellyfinClient {
+    fn build_client() -> Client {
+        Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap_or_default()
+    }
+
     pub fn new(server_url: String) -> Self {
         Self {
-            client: Client::new(),
+            client: Self::build_client(),
             server_url,
             access_token: None,
             user_id: None,
@@ -121,7 +131,7 @@ impl JellyfinClient {
 
     pub fn with_token(server_url: String, access_token: String, user_id: String) -> Self {
         Self {
-            client: Client::new(),
+            client: Self::build_client(),
             server_url,
             access_token: Some(access_token),
             user_id: Some(user_id),

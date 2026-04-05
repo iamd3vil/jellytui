@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use crate::client::{JellyfinClient, MediaItem};
 use crate::config::Config;
 use crate::download::{DownloadManager, DownloadStatus, DownloadTask};
@@ -77,11 +79,14 @@ pub struct App {
     pub total_items: u32,
 
     pub player: MpvPlayer,
+    pub playback_session_id: u64,
     pub now_playing: Option<PlayingItem>,
     pub last_position_ticks: u64,
     pub playback_position_secs: f64,
     pub playback_duration_secs: f64,
     pub playback_paused: bool,
+    pub last_progress_report: Option<Instant>,
+    pub marked_as_played: bool,
 
     pub search_query: String,
     pub search_results: Vec<MediaItem>,
@@ -127,11 +132,14 @@ impl App {
             error_message: None,
             total_items: 0,
             player: MpvPlayer::new(),
+            playback_session_id: 0,
             now_playing: None,
             last_position_ticks: 0,
             playback_position_secs: 0.0,
             playback_duration_secs: 0.0,
             playback_paused: false,
+            last_progress_report: None,
+            marked_as_played: false,
             search_query: String::new(),
             search_results: Vec::new(),
             search_selected: 0,
@@ -179,11 +187,14 @@ impl App {
         self.search_results.clear();
         self.search_selected = 0;
         self.show_downloads = false;
+        self.playback_session_id = 0;
         self.now_playing = None;
         self.last_position_ticks = 0;
         self.playback_position_secs = 0.0;
         self.playback_duration_secs = 0.0;
         self.playback_paused = false;
+        self.last_progress_report = None;
+        self.marked_as_played = false;
         self.player.stop();
         self.config.access_token = None;
         self.config.user_id = None;
