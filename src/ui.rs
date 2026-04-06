@@ -223,7 +223,21 @@ fn format_item(item: &MediaItem) -> String {
         _ => String::new(),
     };
 
-    format!("{} {}{}{}", type_icon, item.name, episode_info, year)
+    let display_name = if item.r#type == "Episode" {
+        if let Some(ref series) = item.series_name {
+            if item.name.contains(series.as_str()) {
+                item.name.clone()
+            } else {
+                format!("{} - {}", series, item.name)
+            }
+        } else {
+            item.name.clone()
+        }
+    } else {
+        item.name.clone()
+    };
+
+    format!("{} {}{}{}", type_icon, display_name, episode_info, year)
 }
 
 fn render_now_playing_footer(frame: &mut Frame, app: &App, area: Rect) {
