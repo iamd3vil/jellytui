@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod download;
 mod events;
+mod images;
 mod player;
 mod ui;
 
@@ -20,11 +21,12 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc;
 
 use crate::app::{App, PlayingItem, Screen};
-use jellyfin_client::{PlaybackProgressInfo, PlaybackStartInfo, PlaybackStopInfo};
 use crate::config::Config;
 use crate::download::{DownloadEvent, perform_download};
 use crate::events::{Event, EventHandler};
+use crate::images::{ImageFetched, ImageManager};
 use crate::player::{PlayerEvent, monitor_playback};
+use jellyfin_client::{PlaybackProgressInfo, PlaybackStartInfo, PlaybackStopInfo};
 
 const TICKS_PER_SECOND: u64 = 10_000_000;
 
@@ -33,6 +35,20 @@ async fn main() -> Result<()> {
     let config = Config::load().unwrap_or_default();
 
     enable_raw_mode()?;
+
+    let (image_tx, image_rx) = mpsc::unbounded_channel::<ImageFetched>();
+    let mut images = match ImageManager::new(image_tx) {
+        Ok(m) => m,
+        Err(e) => {
+            disable_raw_mode().ok();
+            eprintln!("Failed to initialize image renderer: {e}");
+            eprintln!(
+                "Your terminal may not support a graphics protocol. Try Kitty, Ghostty, WezTerm, or a Sixel-capable terminal."
+            );
+            return Ok(());
+        }
+    };
+
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
 
@@ -46,7 +62,7 @@ async fn main() -> Result<()> {
         let _ = app.load_home_content().await;
     }
 
-    let result = run_app(&mut terminal, &mut app, &mut events).await;
+    let result = run_app(&mut terminal, &mut app, &mut events, &mut images, image_rx).await;
 
     disable_raw_mode()?;
     execute!(
@@ -67,12 +83,14 @@ async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
     events: &mut EventHandler,
+    images: &mut ImageManager,
+    mut image_rx: mpsc::UnboundedReceiver<ImageFetched>,
 ) -> Result<()> {
     let (player_tx, mut player_rx) = mpsc::unbounded_channel::<PlayerEvent>();
     let (download_tx, mut download_rx) = mpsc::unbounded_channel::<DownloadEvent>();
 
     while app.running {
-        terminal.draw(|frame| ui::render(frame, app))?;
+        terminal.draw(|frame| ui::render(frame, app, images))?;
 
         tokio::select! {
             event = events.next() => {
@@ -98,6 +116,9 @@ async fn run_app(
             }
             Some(download_event) = download_rx.recv() => {
                 handle_download_event(app, download_event);
+            }
+            Some(image_event) = image_rx.recv() => {
+                images.handle_fetched(image_event);
             }
         }
     }
@@ -163,12 +184,18 @@ async fn handle_browser_input(
         KeyCode::Down | KeyCode::Char('j') => {
             app.move_down();
         }
-        KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+        KeyCode::Left | KeyCode::Char('h') => {
+            app.move_left();
+        }
+        KeyCode::Right | KeyCode::Char('l') => {
+            app.move_right();
+        }
+        KeyCode::Enter => {
             if let Ok(Some(playing_item)) = app.select_item().await {
                 start_playback(app, playing_item, player_tx).await;
             }
         }
-        KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => {
+        KeyCode::Esc | KeyCode::Backspace => {
             if app.screen == Screen::Library {
                 let _ = app.go_back().await;
             }
@@ -218,10 +245,16 @@ async fn handle_search_input(
             app.quit();
         }
         KeyCode::Up => {
-            app.search_move_up();
+            app.move_up();
         }
         KeyCode::Down => {
-            app.search_move_down();
+            app.move_down();
+        }
+        KeyCode::Left => {
+            app.move_left();
+        }
+        KeyCode::Right => {
+            app.move_right();
         }
         KeyCode::Enter => {
             if !app.search_results.is_empty()

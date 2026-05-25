@@ -500,6 +500,20 @@ impl JellyfinClient {
         Ok(subs)
     }
 
+    /// URL for an item's primary image (poster). Returns `None` if the item
+    /// has no primary image tag, which lets callers skip fetching for items
+    /// that would 404. `max_height` caps the server-side resize.
+    pub fn get_primary_image_url(&self, item_id: &str, max_height: u32) -> String {
+        let mut url = format!(
+            "{}/Items/{}/Images/Primary?maxHeight={}&quality=90",
+            self.server_url, item_id, max_height
+        );
+        if let Some(token) = &self.access_token {
+            url.push_str(&format!("&api_key={}", token));
+        }
+        url
+    }
+
     /// Direct-stream URL for an item. Suitable for handing to an external
     /// player like mpv. The returned URL includes the API key.
     pub fn get_stream_url(&self, item_id: &str) -> Result<String> {

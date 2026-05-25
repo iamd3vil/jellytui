@@ -21,3 +21,5 @@ mpv-ipc = "0.1"
 uuid = { version = "1", features = ["v4"] }
 futures-util = "0.3"
 dirs = "5"
+ratatui-image = { version = "8", features = ["crossterm"] }
+image = "0.25"

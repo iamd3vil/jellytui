@@ -1,21 +1,31 @@
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Clear, Gauge, Paragraph, Wrap},
 };
+use ratatui_image::{Resize, StatefulImage, protocol::StatefulProtocol};
 
-use crate::app::{App, HomeDisplayItem, LoginField, Screen};
-use jellyfin_client::MediaItem;
+use crate::app::{App, LoginField, Screen};
 use crate::download::DownloadStatus;
+use crate::images::ImageManager;
+use jellyfin_client::MediaItem;
 
-pub fn render(frame: &mut Frame, app: &App) {
+const POSTER_WIDTH: u16 = 18;
+const POSTER_IMG_HEIGHT: u16 = 10;
+const POSTER_LABEL_HEIGHT: u16 = 3;
+const POSTER_TOTAL_HEIGHT: u16 = POSTER_IMG_HEIGHT + POSTER_LABEL_HEIGHT;
+const SECTION_HEADER_HEIGHT: u16 = 2;
+const SECTION_HEIGHT: u16 = SECTION_HEADER_HEIGHT + POSTER_TOTAL_HEIGHT;
+const POSTER_GAP: u16 = 1;
+
+pub fn render(frame: &mut Frame, app: &mut App, images: &mut ImageManager) {
     match app.screen {
         Screen::Login => render_login(frame, app),
-        Screen::Home => render_browser(frame, app),
-        Screen::Library => render_browser(frame, app),
-        Screen::Search => render_search(frame, app),
+        Screen::Home => render_home(frame, app, images),
+        Screen::Library => render_library(frame, app, images),
+        Screen::Search => render_search(frame, app, images),
     }
 
     if app.show_downloads {
@@ -89,155 +99,503 @@ fn render_login(frame: &mut Frame, app: &App) {
     set_cursor_for_input(frame, app, chunks);
 }
 
-fn render_browser(frame: &mut Frame, app: &App) {
+fn frame_layout(
+    frame_area: Rect,
+    now_playing: bool,
+    search_bar: bool,
+) -> (Option<Rect>, Rect, Rect, Option<Rect>) {
+    let mut constraints = Vec::new();
+    if search_bar {
+        constraints.push(Constraint::Length(3));
+    }
+    constraints.push(Constraint::Min(3));
+    constraints.push(Constraint::Length(1));
+    if now_playing {
+        constraints.push(Constraint::Length(3));
+    } else {
+        constraints.push(Constraint::Length(0));
+    }
+    let chunks = Layout::vertical(constraints).split(frame_area);
+
+    let mut idx = 0;
+    let search_rect = if search_bar {
+        let r = chunks[idx];
+        idx += 1;
+        Some(r)
+    } else {
+        None
+    };
+    let content = chunks[idx];
+    let help = chunks[idx + 1];
+    let footer = if now_playing { Some(chunks[idx + 2]) } else { None };
+    (search_rect, content, help, footer)
+}
+
+fn render_home(frame: &mut Frame, app: &mut App, images: &mut ImageManager) {
     let area = frame.area();
+    let (_, content, help_area, footer_area) =
+        frame_layout(area, app.now_playing.is_some(), false);
 
-    let footer_height = if app.now_playing.is_some() { 3 } else { 0 };
-    let chunks = Layout::vertical([
-        Constraint::Min(3),
-        Constraint::Length(1),
-        Constraint::Length(footer_height),
-    ])
-    .split(area);
-
-    let title = format!("Jellytui - {}", app.current_title());
+    let title = format!("Jellytui — {}", app.current_title());
     let block = Block::default()
-        .title(title)
+        .title(Line::from(vec![Span::styled(
+            title,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )]))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(Color::DarkGray));
+    let inner = block.inner(content);
+    frame.render_widget(block, content);
 
     if app.loading {
-        let loading = Paragraph::new("Loading...")
-            .style(Style::default().fg(Color::Yellow))
-            .block(block);
-        frame.render_widget(loading, chunks[0]);
+        let loading = Paragraph::new("Loading...").style(Style::default().fg(Color::Yellow));
+        frame.render_widget(loading, inner);
     } else if let Some(ref error) = app.error_message {
-        let error_text = Paragraph::new(error.as_str())
-            .style(Style::default().fg(Color::Red))
-            .block(block);
-        frame.render_widget(error_text, chunks[0]);
+        let error_text =
+            Paragraph::new(error.as_str()).style(Style::default().fg(Color::Red));
+        frame.render_widget(error_text, inner);
+    } else if app.home_sections.is_empty() {
+        let empty =
+            Paragraph::new("No content yet. Press 'r' to refresh.").style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(empty, inner);
     } else {
-        let list_items: Vec<ListItem> = match app.screen {
-            Screen::Home => app
-                .home_items
-                .iter()
-                .enumerate()
-                .map(|(i, item)| {
-                    let (content, style) = match item {
-                        HomeDisplayItem::Header(title) => (
-                            title.clone(),
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-                        ),
-                        HomeDisplayItem::Library(lib) => (
-                            format_item(lib),
-                            if i == app.selected_index {
-                                Style::default()
-                                    .fg(Color::Black)
-                                    .bg(Color::Cyan)
-                                    .add_modifier(Modifier::BOLD)
-                            } else {
-                                Style::default()
-                            },
-                        ),
-                        HomeDisplayItem::Item(media) => (
-                            format_item(media),
-                            if i == app.selected_index {
-                                Style::default()
-                                    .fg(Color::Black)
-                                    .bg(Color::Cyan)
-                                    .add_modifier(Modifier::BOLD)
-                            } else {
-                                Style::default()
-                            },
-                        ),
-                    };
-                    ListItem::new(content).style(style)
-                })
-                .collect(),
-            Screen::Library => app
-                .items
-                .iter()
-                .enumerate()
-                .map(|(i, item)| {
-                    let content = format_item(item);
-                    let style = if i == app.selected_index {
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default()
-                    };
-                    ListItem::new(content).style(style)
-                })
-                .collect(),
-            Screen::Login | Screen::Search => vec![],
-        };
-
-        let list = List::new(list_items).block(block);
-
-        let mut state = ListState::default();
-        state.select(Some(app.selected_index));
-
-        frame.render_stateful_widget(list, chunks[0], &mut state);
+        render_home_sections(frame, app, images, inner);
     }
 
-    let help_text = match app.screen {
-        Screen::Home => "j/k: navigate | Enter: open | /: search | d: downloads | q: quit",
-        Screen::Library => {
-            "j/k: navigate | Enter: open/play | D: download | d: downloads | Esc: back | q: quit"
+    render_help(frame, help_area, home_help_text());
+    if let Some(footer) = footer_area {
+        if app.now_playing.is_some() && footer.height > 0 {
+            render_now_playing_footer(frame, app, footer);
         }
-        Screen::Login | Screen::Search => "",
-    };
-    let help = Paragraph::new(help_text).style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(help, chunks[1]);
-
-    if app.now_playing.is_some() && chunks[2].height > 0 && chunks[2].width > 0 {
-        render_now_playing_footer(frame, app, chunks[2]);
     }
 }
 
-fn format_item(item: &MediaItem) -> String {
-    let type_icon = match item.r#type.as_str() {
-        "Movie" => "[M]",
-        "Series" => "[S]",
-        "Season" => "[Sn]",
-        "Episode" => "[E]",
-        "Audio" => "[A]",
-        "MusicAlbum" => "[Al]",
-        "MusicArtist" => "[Ar]",
-        "Folder" | "CollectionFolder" => "[D]",
-        _ => "[ ]",
+fn render_home_sections(
+    frame: &mut Frame,
+    app: &mut App,
+    images: &mut ImageManager,
+    area: Rect,
+) {
+    let visible_section_count = (area.height / SECTION_HEIGHT).max(1) as usize;
+    let total_sections = app.home_sections.len();
+    let scroll = if app.home_row + 1 > visible_section_count {
+        app.home_row + 1 - visible_section_count
+    } else {
+        0
+    };
+    let scroll = scroll.min(total_sections.saturating_sub(visible_section_count));
+
+    let mut y = area.y;
+    let max_y = area.y + area.height;
+
+    let end = (scroll + visible_section_count).min(total_sections);
+    for section_idx in scroll..end {
+        if y >= max_y {
+            break;
+        }
+
+        let section_title = app.home_sections[section_idx].title.clone();
+        let header_rect = Rect {
+            x: area.x,
+            y,
+            width: area.width,
+            height: SECTION_HEADER_HEIGHT.min(max_y.saturating_sub(y)),
+        };
+        let is_selected_row = section_idx == app.home_row;
+        let header_color = if is_selected_row {
+            Color::Yellow
+        } else {
+            Color::Gray
+        };
+        let header = Paragraph::new(Line::from(vec![Span::styled(
+            section_title,
+            Style::default()
+                .fg(header_color)
+                .add_modifier(Modifier::BOLD),
+        )]));
+        frame.render_widget(header, header_rect);
+
+        let row_rect = Rect {
+            x: area.x,
+            y: y.saturating_add(SECTION_HEADER_HEIGHT),
+            width: area.width,
+            height: POSTER_TOTAL_HEIGHT.min(max_y.saturating_sub(y + SECTION_HEADER_HEIGHT)),
+        };
+
+        if row_rect.height > 0 {
+            render_poster_row(
+                frame,
+                app,
+                images,
+                section_idx,
+                row_rect,
+                is_selected_row,
+            );
+        }
+
+        y = y.saturating_add(SECTION_HEIGHT);
+    }
+}
+
+fn render_poster_row(
+    frame: &mut Frame,
+    app: &mut App,
+    images: &mut ImageManager,
+    section_idx: usize,
+    area: Rect,
+    is_selected_row: bool,
+) {
+    let section = match app.home_sections.get(section_idx) {
+        Some(s) => s.clone(),
+        None => return,
     };
 
+    let item_count = section.items.len();
+    if item_count == 0 {
+        return;
+    }
+
+    let cell_width = POSTER_WIDTH + POSTER_GAP;
+    let visible_cols = (area.width / cell_width).max(1) as usize;
+
+    let selected_col = if is_selected_row { app.home_col } else { usize::MAX };
+
+    let col_scroll = if is_selected_row {
+        if app.home_col + 1 > visible_cols {
+            app.home_col + 1 - visible_cols
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
+    for col_offset in 0..visible_cols {
+        let idx = col_scroll + col_offset;
+        if idx >= item_count {
+            break;
+        }
+        let item = &section.items[idx];
+        let x = area.x + col_offset as u16 * cell_width;
+        if x + POSTER_WIDTH > area.x + area.width {
+            break;
+        }
+        let cell = Rect {
+            x,
+            y: area.y,
+            width: POSTER_WIDTH,
+            height: area.height,
+        };
+
+        let is_selected = idx == selected_col;
+        let url = app.client.as_ref().map(|c| c.get_primary_image_url(&item.id, 240));
+        render_poster_cell(frame, images, item, url, cell, is_selected);
+    }
+}
+
+fn render_poster_cell(
+    frame: &mut Frame,
+    images: &mut ImageManager,
+    item: &MediaItem,
+    image_url: Option<String>,
+    area: Rect,
+    is_selected: bool,
+) {
+    if area.height < 3 || area.width < 4 {
+        return;
+    }
+
+    let img_height = POSTER_IMG_HEIGHT.min(area.height.saturating_sub(POSTER_LABEL_HEIGHT));
+    let img_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: img_height,
+    };
+    let label_area = Rect {
+        x: area.x,
+        y: area.y + img_height,
+        width: area.width,
+        height: area.height.saturating_sub(img_height),
+    };
+
+    let border_style = if is_selected {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    let poster_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style);
+    let poster_inner = poster_block.inner(img_area);
+    frame.render_widget(poster_block, img_area);
+
+    if let Some(url) = image_url {
+        images.ensure(&item.id, url);
+    }
+
+    if let Some(protocol) = images.get_mut(&item.id) {
+        let widget = StatefulImage::<StatefulProtocol>::default().resize(Resize::Fit(None));
+        frame.render_stateful_widget(widget, poster_inner, protocol);
+    } else if images.is_failed(&item.id) {
+        let placeholder = Paragraph::new(type_icon(item))
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(placeholder, centered_in(poster_inner, 3, 1));
+    } else {
+        let placeholder = Paragraph::new("...")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(placeholder, centered_in(poster_inner, 3, 1));
+    }
+
+    let display_name = poster_label(item);
     let year = item
         .production_year
-        .map(|y| format!(" ({})", y))
+        .map(|y| format!("{}", y))
         .unwrap_or_default();
-
-    let episode_info = match (&item.parent_index_number, &item.index_number) {
-        (Some(s), Some(e)) => format!(" S{:02}E{:02}", s, e),
-        (None, Some(e)) => format!(" E{}", e),
-        _ => String::new(),
+    let name_style = if is_selected {
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
     };
+    let label_lines = vec![
+        Line::from(Span::styled(display_name, name_style)),
+        Line::from(Span::styled(
+            year,
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    let label = Paragraph::new(label_lines)
+        .alignment(Alignment::Left)
+        .wrap(Wrap { trim: true });
+    frame.render_widget(label, label_area);
+}
 
-    let display_name = if item.r#type == "Episode" {
-        if let Some(ref series) = item.series_name {
-            if item.name.contains(series.as_str()) {
-                item.name.clone()
-            } else {
-                format!("{} - {}", series, item.name)
-            }
-        } else {
-            item.name.clone()
+fn poster_label(item: &MediaItem) -> String {
+    if item.r#type == "Episode" {
+        match (&item.series_name, &item.parent_index_number, &item.index_number) {
+            (Some(series), Some(s), Some(e)) => format!("{} S{:02}E{:02}", series, s, e),
+            (Some(series), _, _) => series.clone(),
+            _ => item.name.clone(),
         }
     } else {
         item.name.clone()
+    }
+}
+
+fn type_icon(item: &MediaItem) -> &'static str {
+    match item.r#type.as_str() {
+        "Movie" => "Movie",
+        "Series" => "Series",
+        "Season" => "Season",
+        "Episode" => "Episode",
+        "Audio" => "Audio",
+        "MusicAlbum" => "Album",
+        "MusicArtist" => "Artist",
+        "Folder" | "CollectionFolder" => "Folder",
+        _ => "?",
+    }
+}
+
+fn centered_in(area: Rect, width: u16, height: u16) -> Rect {
+    let w = width.min(area.width);
+    let h = height.min(area.height);
+    Rect {
+        x: area.x + (area.width.saturating_sub(w)) / 2,
+        y: area.y + (area.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    }
+}
+
+fn render_library(frame: &mut Frame, app: &mut App, images: &mut ImageManager) {
+    let area = frame.area();
+    let (_, content, help_area, footer_area) =
+        frame_layout(area, app.now_playing.is_some(), false);
+
+    let title = format!("Jellytui — {}", app.current_title());
+    let block = Block::default()
+        .title(Line::from(vec![Span::styled(
+            title,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )]))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+    let inner = block.inner(content);
+    frame.render_widget(block, content);
+
+    if app.loading {
+        frame.render_widget(
+            Paragraph::new("Loading...").style(Style::default().fg(Color::Yellow)),
+            inner,
+        );
+    } else if let Some(ref error) = app.error_message {
+        frame.render_widget(
+            Paragraph::new(error.as_str()).style(Style::default().fg(Color::Red)),
+            inner,
+        );
+    } else if app.items.is_empty() {
+        frame.render_widget(
+            Paragraph::new("Empty.").style(Style::default().fg(Color::DarkGray)),
+            inner,
+        );
+    } else {
+        let items = app.items.clone();
+        render_grid(frame, app, images, &items, app.selected_index, inner);
+    }
+
+    render_help(frame, help_area, library_help_text());
+    if let Some(footer) = footer_area {
+        if app.now_playing.is_some() && footer.height > 0 {
+            render_now_playing_footer(frame, app, footer);
+        }
+    }
+}
+
+fn render_search(frame: &mut Frame, app: &mut App, images: &mut ImageManager) {
+    let area = frame.area();
+    let (search_rect, content, help_area, footer_area) =
+        frame_layout(area, app.now_playing.is_some(), true);
+
+    if let Some(rect) = search_rect {
+        let search_block = Block::default()
+            .title("Search")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow));
+        let search_input = Paragraph::new(app.search_query.as_str()).block(search_block);
+        frame.render_widget(search_input, rect);
+        frame.set_cursor_position((rect.x + app.search_query.len() as u16 + 1, rect.y + 1));
+    }
+
+    let results_block = Block::default()
+        .title(format!("Results ({})", app.search_results.len()))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+    let inner = results_block.inner(content);
+    frame.render_widget(results_block, content);
+
+    if app.loading {
+        frame.render_widget(
+            Paragraph::new("Searching...").style(Style::default().fg(Color::Yellow)),
+            inner,
+        );
+    } else if let Some(ref error) = app.error_message {
+        frame.render_widget(
+            Paragraph::new(error.as_str()).style(Style::default().fg(Color::Red)),
+            inner,
+        );
+    } else if app.search_results.is_empty() {
+        let msg = if app.search_query.is_empty() {
+            "Type to search..."
+        } else {
+            "No results found"
+        };
+        frame.render_widget(
+            Paragraph::new(msg).style(Style::default().fg(Color::DarkGray)),
+            inner,
+        );
+    } else {
+        let items = app.search_results.clone();
+        render_grid(frame, app, images, &items, app.search_selected, inner);
+    }
+
+    render_help(frame, help_area, search_help_text());
+    if let Some(footer) = footer_area {
+        if app.now_playing.is_some() && footer.height > 0 {
+            render_now_playing_footer(frame, app, footer);
+        }
+    }
+}
+
+fn render_grid(
+    frame: &mut Frame,
+    app: &mut App,
+    images: &mut ImageManager,
+    items: &[MediaItem],
+    selected: usize,
+    area: Rect,
+) {
+    if area.width < POSTER_WIDTH || area.height < POSTER_TOTAL_HEIGHT {
+        return;
+    }
+
+    let cell_w = POSTER_WIDTH + POSTER_GAP;
+    let cell_h = POSTER_TOTAL_HEIGHT + 1;
+    let cols = (area.width / cell_w).max(1) as usize;
+    let rows = (area.height / cell_h).max(1) as usize;
+
+    app.grid_columns = cols;
+
+    let total = items.len();
+    let selected_row = selected / cols;
+    let row_scroll = if selected_row + 1 > rows {
+        selected_row + 1 - rows
+    } else {
+        0
     };
 
-    format!("{} {}{}{}", type_icon, display_name, episode_info, year)
+    for row_offset in 0..rows {
+        let row_idx = row_scroll + row_offset;
+        let start = row_idx * cols;
+        if start >= total {
+            break;
+        }
+        for col in 0..cols {
+            let idx = start + col;
+            if idx >= total {
+                break;
+            }
+            let x = area.x + col as u16 * cell_w;
+            let y = area.y + row_offset as u16 * cell_h;
+            if x + POSTER_WIDTH > area.x + area.width
+                || y + POSTER_TOTAL_HEIGHT > area.y + area.height
+            {
+                continue;
+            }
+            let cell = Rect {
+                x,
+                y,
+                width: POSTER_WIDTH,
+                height: POSTER_TOTAL_HEIGHT,
+            };
+            let item = &items[idx];
+            let url = app
+                .client
+                .as_ref()
+                .map(|c| c.get_primary_image_url(&item.id, 240));
+            render_poster_cell(frame, images, item, url, cell, idx == selected);
+        }
+    }
+}
+
+fn render_help(frame: &mut Frame, area: Rect, text: &str) {
+    if area.height == 0 {
+        return;
+    }
+    let help = Paragraph::new(text).style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(help, area);
+}
+
+fn home_help_text() -> &'static str {
+    "h/j/k/l: navigate | Enter: open | /: search | d: downloads | r: refresh | q: quit"
+}
+
+fn library_help_text() -> &'static str {
+    "h/j/k/l: navigate | Enter: open/play | D: download | d: downloads | Esc: back | q: quit"
+}
+
+fn search_help_text() -> &'static str {
+    "Type to search | h/j/k/l or arrows: navigate | Enter: open/play | Esc: close"
 }
 
 fn render_now_playing_footer(frame: &mut Frame, app: &App, area: Rect) {
@@ -252,11 +610,7 @@ fn render_now_playing_footer(frame: &mut Frame, app: &App, area: Rect) {
         0.0
     };
 
-    let status = if app.playback_paused {
-        "Paused"
-    } else {
-        "Playing"
-    };
+    let status = if app.playback_paused { "Paused" } else { "Playing" };
     let label = if duration > 0.0 {
         format!(
             "{} / {}  •  {}",
@@ -272,7 +626,8 @@ fn render_now_playing_footer(frame: &mut Frame, app: &App, area: Rect) {
         )
     };
 
-    let title = format!("Now Playing - {}", format_item(&playing.item));
+    let display = poster_label(&playing.item);
+    let title = format!("Now Playing — {}", display);
     let gauge_color = if app.playback_paused {
         Color::Yellow
     } else {
@@ -341,91 +696,6 @@ fn set_cursor_for_input(frame: &mut Frame, app: &App, chunks: std::rc::Rc<[Rect]
     frame.set_cursor_position((chunk.x + input_len as u16 + 1, chunk.y + 1));
 }
 
-fn render_search(frame: &mut Frame, app: &App) {
-    let area = frame.area();
-
-    let footer_height = if app.now_playing.is_some() { 3 } else { 0 };
-    let chunks = Layout::vertical([
-        Constraint::Length(3),
-        Constraint::Min(3),
-        Constraint::Length(1),
-        Constraint::Length(footer_height),
-    ])
-    .split(area);
-
-    let search_block = Block::default()
-        .title("Search")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow));
-    let search_input = Paragraph::new(app.search_query.as_str()).block(search_block);
-    frame.render_widget(search_input, chunks[0]);
-
-    frame.set_cursor_position((
-        chunks[0].x + app.search_query.len() as u16 + 1,
-        chunks[0].y + 1,
-    ));
-
-    let results_block = Block::default()
-        .title(format!("Results ({})", app.search_results.len()))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
-
-    if app.loading {
-        let loading = Paragraph::new("Searching...")
-            .style(Style::default().fg(Color::Yellow))
-            .block(results_block);
-        frame.render_widget(loading, chunks[1]);
-    } else if let Some(ref error) = app.error_message {
-        let error_text = Paragraph::new(error.as_str())
-            .style(Style::default().fg(Color::Red))
-            .block(results_block);
-        frame.render_widget(error_text, chunks[1]);
-    } else if app.search_results.is_empty() {
-        let empty_msg = if app.search_query.is_empty() {
-            "Type to search..."
-        } else {
-            "No results found"
-        };
-        let empty = Paragraph::new(empty_msg)
-            .style(Style::default().fg(Color::DarkGray))
-            .block(results_block);
-        frame.render_widget(empty, chunks[1]);
-    } else {
-        let list_items: Vec<ListItem> = app
-            .search_results
-            .iter()
-            .enumerate()
-            .map(|(i, item)| {
-                let content = format_item(item);
-                let style = if i == app.search_selected {
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
-                ListItem::new(content).style(style)
-            })
-            .collect();
-
-        let list = List::new(list_items).block(results_block);
-
-        let mut state = ListState::default();
-        state.select(Some(app.search_selected));
-
-        frame.render_stateful_widget(list, chunks[1], &mut state);
-    }
-
-    let help = Paragraph::new("Type to search | Up/Down: navigate | Enter: open/play | Esc: close")
-        .style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(help, chunks[2]);
-
-    if app.now_playing.is_some() && chunks[3].height > 0 && chunks[3].width > 0 {
-        render_now_playing_footer(frame, app, chunks[3]);
-    }
-}
-
 fn render_downloads_popup(frame: &mut Frame, app: &App) {
     let area = frame.area();
     let popup_area = centered_rect(70, 60, area);
@@ -479,3 +749,4 @@ fn render_downloads_popup(frame: &mut Frame, app: &App) {
         frame.render_widget(gauge, chunks[i]);
     }
 }
+
